@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# App
+app.log
+cnpj_cache.db
+*.exe
+dist/
+build/
+BUSCAR_CNPJ.spec
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Arquivos salvos
+*.txt
+*.csv
