@@ -26,6 +26,9 @@ dist/
 build/
 BUSCAR_CNPJ.spec
 
+# Testing
+.pytest_cache/
+
 # OS
 .DS_Store
 Thumbs.db

@@ -1,0 +1,24 @@
+[project]
+name = "BUSCAR_CNPJ"
+version = "0.1.0"
+description = "Aplicativo desktop para consultar CNPJ, validar dados e exportar resultados para TXT."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+    { name = "alencastro6-lgtm" }
+]
+keywords = ["cnpj", "python", "tkinter", "consulta"]
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Software Development :: User Interfaces",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/alencastro6-lgtm/buscarcnpj"
+"Repository" = "https://github.com/alencastro6-lgtm/buscarcnpj"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"

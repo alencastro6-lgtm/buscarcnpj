@@ -1,4 +1,4 @@
-from main import _apenas_digitos, _formatar_cnpj, validar_cnpj
+from cnpj_service import _apenas_digitos, _formatar_cnpj, validar_cnpj
 
 
 def test_apenas_digitos():
@@ -10,7 +10,6 @@ def test_formatar_cnpj():
 
 
 def test_validar_cnpj():
-    # exemplo válido
     assert validar_cnpj("11444777000161") is True
     assert validar_cnpj("00000000000000") is False
     assert validar_cnpj("123") is False
