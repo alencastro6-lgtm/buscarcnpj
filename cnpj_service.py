@@ -165,11 +165,32 @@ def _save_history(cnpj: str) -> None:
         logging.exception("Erro ao salvar histórico")
 
 
+def _clear_history() -> None:
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM history")
+        conn.commit()
+        conn.close()
+    except Exception:
+        logging.exception("Erro ao limpar histórico")
+        raise
+
+
 def _get_history(limit: int = 10) -> list[str]:
     try:
         conn = sqlite3.connect(DB_FILE)
         cur = conn.cursor()
-        cur.execute("SELECT DISTINCT cnpj FROM history ORDER BY ts DESC LIMIT ?", (limit,))
+        cur.execute(
+            """
+            SELECT cnpj
+            FROM history
+            GROUP BY cnpj
+            ORDER BY MAX(ts) DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
         rows = [r[0] for r in cur.fetchall()]
         conn.close()
         return rows
@@ -220,6 +241,7 @@ def consultar_cnpj(cnpj: str) -> dict:
                 "bairro": dados.get("bairro") or "",
                 "municipio": dados.get("municipio") or "",
                 "uf": dados.get("uf") or "",
+                "_origem": "BrasilAPI",
             }
         erros.append(str(dados.get("message") or "BrasilAPI sem retorno válido"))
     except (error.URLError, error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
@@ -252,6 +274,7 @@ def consultar_cnpj(cnpj: str) -> dict:
                 "bairro": dados.get("bairro") or "",
                 "municipio": dados.get("municipio") or "",
                 "uf": dados.get("uf") or "",
+                "_origem": "ReceitaWS",
             }
         erros.append(str(dados.get("message") or "ReceitaWS sem retorno válido"))
     except (error.URLError, error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError) as exc:

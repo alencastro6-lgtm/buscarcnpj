@@ -7,6 +7,9 @@ Aplicativo desktop para consultar CNPJ, validar os dados e exportar resultados p
 - Validação completa de CNPJ
 - Interface gráfica com histórico de consultas
 - Armazenamento local em SQLite para cache e histórico
+- Indicação se os dados vieram do cache, BrasilAPI ou ReceitaWS
+- Botão para limpar o histórico
+- Campos organizados por empresa, contato e endereço
 - Exporta dados para arquivo TXT
 - Copia campos individuais ou todos de uma vez
 - Cliques rápidos com formatação automática de CNPJ

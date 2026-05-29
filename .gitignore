@@ -36,3 +36,4 @@ Thumbs.db
 # Arquivos salvos
 *.txt
 *.csv
+!requirements.txt
