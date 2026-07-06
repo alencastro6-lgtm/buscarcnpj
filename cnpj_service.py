@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import time
 from pathlib import Path
 from urllib import error, request
+from urllib.parse import quote
 
 API_TIMEOUT = 20
+CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
 DB_FILE = Path(__file__).parent / "cnpj_cache.db"
 LOG_FILE = Path(__file__).parent / "app.log"
 
@@ -102,99 +105,97 @@ def validar_cnpj(cnpj: str) -> bool:
 
 
 def _init_db() -> None:
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS cache(
-            cnpj TEXT PRIMARY KEY,
-            data TEXT,
-            updated_at INTEGER
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cache(
+                cnpj TEXT PRIMARY KEY,
+                data TEXT,
+                updated_at INTEGER
+            )
+            """
         )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS history(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cnpj TEXT,
-            ts INTEGER
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS history(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cnpj TEXT,
+                ts INTEGER
+            )
+            """
         )
-        """
-    )
-    conn.commit()
-    conn.close()
 
 
 def _load_cache(cnpj: str) -> dict | None:
     try:
-        conn = sqlite3.connect(DB_FILE)
-        cur = conn.cursor()
-        cur.execute("SELECT data FROM cache WHERE cnpj = ?", (cnpj,))
-        row = cur.fetchone()
-        conn.close()
+        with sqlite3.connect(DB_FILE) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT data, updated_at FROM cache WHERE cnpj = ?", (cnpj,))
+            row = cur.fetchone()
         if row:
+            if _cache_expirado(int(row[1] or 0)):
+                return None
             return json.loads(row[0])
-    except Exception:
+    except (sqlite3.Error, ValueError, TypeError, json.JSONDecodeError):
         logging.exception("Erro ao carregar cache")
     return None
 
 
+def _cache_expirado(updated_at: int, agora: int | None = None) -> bool:
+    if updated_at <= 0:
+        return True
+    referencia = int(time.time()) if agora is None else agora
+    return referencia - updated_at > CACHE_TTL_SECONDS
+
+
 def _save_cache(cnpj: str, data: dict) -> None:
     try:
-        conn = sqlite3.connect(DB_FILE)
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT OR REPLACE INTO cache(cnpj,data,updated_at) VALUES(?,?,?)",
-            (cnpj, json.dumps(data, ensure_ascii=False), int(time.time())),
-        )
-        conn.commit()
-        conn.close()
-    except Exception:
+        with sqlite3.connect(DB_FILE) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT OR REPLACE INTO cache(cnpj,data,updated_at) VALUES(?,?,?)",
+                (cnpj, json.dumps(data, ensure_ascii=False), int(time.time())),
+            )
+    except (sqlite3.Error, TypeError):
         logging.exception("Erro ao salvar cache")
 
 
 def _save_history(cnpj: str) -> None:
     try:
-        conn = sqlite3.connect(DB_FILE)
-        cur = conn.cursor()
-        cur.execute("INSERT INTO history(cnpj,ts) VALUES(?,?)", (cnpj, int(time.time())))
-        conn.commit()
-        conn.close()
-    except Exception:
+        with sqlite3.connect(DB_FILE) as conn:
+            cur = conn.cursor()
+            cur.execute("INSERT INTO history(cnpj,ts) VALUES(?,?)", (cnpj, int(time.time())))
+    except sqlite3.Error:
         logging.exception("Erro ao salvar histórico")
 
 
 def _clear_history() -> None:
     try:
-        conn = sqlite3.connect(DB_FILE)
-        cur = conn.cursor()
-        cur.execute("DELETE FROM history")
-        conn.commit()
-        conn.close()
-    except Exception:
+        with sqlite3.connect(DB_FILE) as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM history")
+    except sqlite3.Error:
         logging.exception("Erro ao limpar histórico")
         raise
 
 
 def _get_history(limit: int = 10) -> list[str]:
     try:
-        conn = sqlite3.connect(DB_FILE)
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT cnpj
-            FROM history
-            GROUP BY cnpj
-            ORDER BY MAX(ts) DESC
-            LIMIT ?
-            """,
-            (limit,),
-        )
-        rows = [r[0] for r in cur.fetchall()]
-        conn.close()
-        return rows
-    except Exception:
+        with sqlite3.connect(DB_FILE) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT cnpj
+                FROM history
+                GROUP BY cnpj
+                ORDER BY MAX(ts) DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            return [r[0] for r in cur.fetchall()]
+    except sqlite3.Error:
         logging.exception("Erro ao ler histórico")
     return []
 
@@ -210,6 +211,224 @@ def _get_json(url: str) -> dict:
     with request.urlopen(req, timeout=API_TIMEOUT) as resp:
         conteudo = resp.read().decode("utf-8")
         return json.loads(conteudo)
+
+
+def _consultar_cep_por_numero(cep_limpo: str) -> dict:
+    """Consulta CEP com múltiplas APIs para garantir dados completos, incluindo bairro."""
+    erros: list[str] = []
+    resultado: dict = {}
+    
+    # Tenta BrasilAPI primeiro
+    try:
+        dados = _get_json(f"https://brasilapi.com.br/api/cep/v1/{cep_limpo}")
+        if isinstance(dados, dict) and not dados.get("message"):
+            resultado = {
+                "cep": _formatar_cep(str(dados.get("cep") or cep_limpo)),
+                "logradouro": dados.get("street") or dados.get("logradouro") or "",
+                "complemento": dados.get("complement") or dados.get("complemento") or "",
+                "bairro": dados.get("neighborhood") or dados.get("bairro") or "",
+                "localidade": dados.get("city") or dados.get("localidade") or "",
+                "uf": dados.get("state") or dados.get("uf") or "",
+                "ddd": str(dados.get("ddd") or ""),
+                "ibge": str(dados.get("ibge") or ""),
+                "gia": str(dados.get("gia") or ""),
+                "siafi": str(dados.get("siafi") or ""),
+                "service": "BrasilAPI",
+            }
+            if resultado.get("bairro"):
+                return resultado
+        else:
+            mensagem = dados.get("message") if isinstance(dados, dict) else "BrasilAPI sem retorno válido"
+            erros.append(f"BrasilAPI: {mensagem}")
+    except (error.URLError, error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
+        erros.append(f"BrasilAPI: {exc}")
+
+    # Tenta ViaCEP se BrasilAPI não retornou ou faltam dados
+    try:
+        dados = _get_json(f"https://viacep.com.br/ws/{cep_limpo}/json/")
+        if isinstance(dados, dict) and not dados.get("erro"):
+            dados_viacep = {
+                "cep": _formatar_cep(str(dados.get("cep") or cep_limpo)),
+                "logradouro": dados.get("logradouro") or "",
+                "complemento": dados.get("complemento") or "",
+                "bairro": dados.get("bairro") or "",
+                "localidade": dados.get("localidade") or "",
+                "uf": dados.get("uf") or "",
+                "ddd": str(dados.get("ddd") or ""),
+                "ibge": str(dados.get("ibge") or ""),
+                "gia": str(dados.get("gia") or ""),
+                "siafi": str(dados.get("siafi") or ""),
+                "service": "ViaCEP",
+            }
+            # Mescla com resultado anterior, preenchendo campos vazios
+            if not resultado:
+                resultado = dados_viacep
+            else:
+                for chave, valor in dados_viacep.items():
+                    if not resultado.get(chave) and valor:
+                        resultado[chave] = valor
+            if resultado.get("bairro"):
+                return resultado
+        else:
+            mensagem = dados.get("message") if isinstance(dados, dict) else "ViaCEP sem retorno válido"
+            erros.append(f"ViaCEP: {mensagem or 'CEP não localizado'}")
+    except (error.URLError, error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
+        erros.append(f"ViaCEP: {exc}")
+
+    # Tenta OpenCEP (API alternativa confiável)
+    try:
+        dados = _get_json(f"https://cep.awesomeapi.com.br/json/{cep_limpo}")
+        if isinstance(dados, dict) and not dados.get("status") or dados.get("status") == 200:
+            dados_openapi = {
+                "cep": _formatar_cep(str(dados.get("cep") or cep_limpo)),
+                "logradouro": dados.get("address") or dados.get("logradouro") or "",
+                "complemento": dados.get("complemento") or "",
+                "bairro": dados.get("district") or dados.get("bairro") or "",
+                "localidade": dados.get("city") or dados.get("localidade") or "",
+                "uf": dados.get("state") or dados.get("uf") or "",
+                "ddd": str(dados.get("ddd") or ""),
+                "ibge": str(dados.get("ibge") or ""),
+                "gia": str(dados.get("gia") or ""),
+                "siafi": str(dados.get("siafi") or ""),
+                "service": "AwesomeAPI",
+            }
+            # Mescla dados
+            if not resultado:
+                resultado = dados_openapi
+            else:
+                for chave, valor in dados_openapi.items():
+                    if not resultado.get(chave) and valor:
+                        resultado[chave] = valor
+            if resultado.get("bairro"):
+                return resultado
+    except (error.URLError, error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
+        erros.append(f"AwesomeAPI: {exc}")
+
+    # Se encontrou dados parciais, tenta busca complementar por bairro
+    if resultado and not resultado.get("bairro") and resultado.get("logradouro") and resultado.get("localidade"):
+        try:
+            resultado.update(_buscar_bairro_complementar(resultado))
+        except Exception as exc:
+            erros.append(f"Busca complementar: {exc}")
+
+    # Retorna resultado se encontrado dados
+    if resultado and resultado.get("logradouro"):
+        return resultado
+
+    raise RuntimeError("Falha ao consultar CEP. " + " | ".join(erros) if erros else "CEP não localizado em nenhuma API.")
+
+
+def _buscar_bairro_complementar(dados: dict) -> dict:
+    """Tenta preencher o bairro usando busca por endereço."""
+    complemento = dados.copy()
+    
+    # Se não tem bairro, tenta buscar via endereço completo
+    uf = dados.get("uf", "")
+    localidade = dados.get("localidade", "")
+    logradouro = dados.get("logradouro", "")
+    
+    if not uf or not localidade or not logradouro:
+        return complemento
+    
+    try:
+        # Tenta ViaCEP com endereço para obter bairro
+        url = f"https://viacep.com.br/ws/{quote(uf)}/{quote(localidade)}/{quote(logradouro)}/json/"
+        dados_busca = _get_json(url)
+        
+        if isinstance(dados_busca, list) and dados_busca:
+            primeiro = dados_busca[0]
+            if primeiro.get("bairro"):
+                complemento["bairro"] = primeiro.get("bairro")
+                complemento["ibge"] = str(primeiro.get("ibge") or complemento.get("ibge", ""))
+                complemento["siafi"] = str(primeiro.get("siafi") or complemento.get("siafi", ""))
+    except Exception:
+        pass
+    
+    return complemento
+
+
+def consultar_cep_por_endereco(endereco: str) -> dict:
+    """Consulta CEP por endereço com suporte a múltiplas APIs e preenchimento automático de bairro."""
+    partes = [p.strip() for p in re.split(r"[,-/]", endereco) if p.strip()]
+    if len(partes) < 3:
+        raise ValueError("Informe o endereço no formato UF, Cidade e Logradouro.")
+
+    uf = partes[0].upper()
+    cidade = partes[1]
+    logradouro = " ".join(partes[2:])
+    if len(uf) != 2 or not uf.isalpha():
+        raise ValueError("Informe a UF com dois caracteres no endereço.")
+
+    resultado: dict = {}
+    erros: list[str] = []
+
+    # Tenta ViaCEP (mais confiável para busca por endereço)
+    try:
+        url = f"https://viacep.com.br/ws/{quote(uf)}/{quote(cidade)}/{quote(logradouro)}/json/"
+        dados_lista = _get_json(url)
+        if isinstance(dados_lista, list) and dados_lista:
+            resultado_temp = dados_lista[0]
+            resultado = {
+                "cep": _formatar_cep(str(resultado_temp.get("cep") or "")),
+                "logradouro": resultado_temp.get("logradouro") or "",
+                "complemento": resultado_temp.get("complemento") or "",
+                "bairro": resultado_temp.get("bairro") or "",
+                "localidade": resultado_temp.get("localidade") or "",
+                "uf": resultado_temp.get("uf") or "",
+                "ddd": str(resultado_temp.get("ddd") or ""),
+                "ibge": str(resultado_temp.get("ibge") or ""),
+                "gia": str(resultado_temp.get("gia") or ""),
+                "siafi": str(resultado_temp.get("siafi") or ""),
+                "service": "ViaCEP",
+            }
+            if resultado.get("bairro"):
+                return resultado
+        elif isinstance(dados_lista, dict) and dados_lista.get("erro"):
+            erros.append("ViaCEP: Endereço não localizado.")
+    except (error.URLError, error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
+        erros.append(f"ViaCEP: {exc}")
+
+    # Se ViaCEP não encontrou ou faltam dados, tenta BrasilAPI
+    if not resultado:
+        try:
+            # BrasilAPI usa formato diferente para busca por endereço
+            url = f"https://brasilapi.com.br/api/cep/v1/{quote(logradouro)}"
+            dados = _get_json(url)
+            if isinstance(dados, dict) and not dados.get("message"):
+                resultado = {
+                    "cep": _formatar_cep(str(dados.get("cep") or "")),
+                    "logradouro": dados.get("street") or dados.get("logradouro") or "",
+                    "complemento": dados.get("complement") or dados.get("complemento") or "",
+                    "bairro": dados.get("neighborhood") or dados.get("bairro") or "",
+                    "localidade": dados.get("city") or dados.get("localidade") or "",
+                    "uf": dados.get("state") or dados.get("uf") or "",
+                    "ddd": str(dados.get("ddd") or ""),
+                    "ibge": str(dados.get("ibge") or ""),
+                    "gia": str(dados.get("gia") or ""),
+                    "siafi": str(dados.get("siafi") or ""),
+                    "service": "BrasilAPI",
+                }
+        except (error.URLError, error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
+            erros.append(f"BrasilAPI: {exc}")
+
+    if resultado and resultado.get("bairro"):
+        return resultado
+    elif resultado and resultado.get("logradouro"):
+        return resultado
+
+    raise RuntimeError("Endereço não encontrado. " + " | ".join(erros) if erros else "Nenhuma API retornou dados válidos.")
+
+
+def consultar_cep(cep: str) -> dict:
+    consulta = str(cep or "").strip()
+    if not consulta:
+        raise ValueError("Informe um CEP com 8 dígitos ou um endereço no formato UF/Cidade/Logradouro.")
+
+    cep_limpo = _apenas_digitos(consulta)
+    if consulta.replace("-", "").isdigit() and len(cep_limpo) == 8:
+        return _consultar_cep_por_numero(cep_limpo)
+
+    return consultar_cep_por_endereco(consulta)
 
 
 def consultar_cnpj(cnpj: str) -> dict:
@@ -243,7 +462,8 @@ def consultar_cnpj(cnpj: str) -> dict:
                 "uf": dados.get("uf") or "",
                 "_origem": "BrasilAPI",
             }
-        erros.append(str(dados.get("message") or "BrasilAPI sem retorno válido"))
+        mensagem = dados.get("message") if isinstance(dados, dict) else "BrasilAPI sem retorno válido"
+        erros.append(str(mensagem))
     except (error.URLError, error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
         erros.append(f"BrasilAPI: {exc}")
 
@@ -276,7 +496,8 @@ def consultar_cnpj(cnpj: str) -> dict:
                 "uf": dados.get("uf") or "",
                 "_origem": "ReceitaWS",
             }
-        erros.append(str(dados.get("message") or "ReceitaWS sem retorno válido"))
+        mensagem = dados.get("message") if isinstance(dados, dict) else "ReceitaWS sem retorno válido"
+        erros.append(str(mensagem))
     except (error.URLError, error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
         erros.append(f"ReceitaWS: {exc}")
 

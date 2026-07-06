@@ -19,6 +19,9 @@ classifiers = [
 "Homepage" = "https://github.com/alencastro6-lgtm/buscarcnpj"
 "Repository" = "https://github.com/alencastro6-lgtm/buscarcnpj"
 
+[project.scripts]
+buscar-cnpj = "main:main"
+
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
